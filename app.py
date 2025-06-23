@@ -1,15 +1,15 @@
 
-from flask import Flask, render_template, request, send_file, flash
+from flask import Flask, render_template, request, send_file
 import pandas as pd
-from fpdf import FPDF
 import os
-import uuid
+from fpdf import FPDF
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'geheim'
-
-UPLOAD_FOLDER = 'static/uploads'
+UPLOAD_FOLDER = 'uploads'
+OUTPUT_FOLDER = 'output'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 @app.route('/')
 def index():
@@ -18,82 +18,87 @@ def index():
 @app.route('/vergleichen', methods=['POST'])
 def vergleichen():
     try:
-        ennux_file = request.files['ennux_file']
-        newsales_file = request.files['newsales_file']
+        ennux_file = request.files['ennux']
+        newsales_file = request.files['newsales']
 
-        if not ennux_file or not newsales_file:
-            flash("Beide Dateien müssen hochgeladen werden.")
-            return render_template('index.html')
+        ennux_df = pd.read_csv(ennux_file, sep=';')
+        newsales_df = pd.read_csv(newsales_file, sep=';')
 
-        ennux = pd.read_csv(ennux_file, sep=';')
-        newsales = pd.read_csv(newsales_file, sep=';')
+        expected_columns = ['Versorger', 'Tarif', 'Tarif-ID', 'Starte', 'Typ', 
+                            'Verbrauch von', 'Verbrauch bis', 'Provision in Euro']
 
-        required_cols = ['Versorger', 'Tarif', 'Tarif-ID', 'Starte', 'Typ', 'Verbrauch von', 'Verbrauch bis', 'Provision in Euro']
+        for df in [ennux_df, newsales_df]:
+            if not all(col in df.columns for col in expected_columns):
+                raise ValueError("Eine der Dateien enthält nicht alle erforderlichen Spalten.")
 
-        if not all(col in ennux.columns for col in required_cols):
-            flash("Ennux-Datei enthält nicht alle erforderlichen Spalten.")
-            return render_template('index.html')
-        if not all(col in newsales.columns for col in required_cols):
-            flash("Newsales-Datei enthält nicht alle erforderlichen Spalten.")
-            return render_template('index.html')
+        if 'Sonderprovision' not in ennux_df.columns:
+            ennux_df['Sonderprovision'] = 0
 
-        ennux = ennux[required_cols].copy()
-        newsales = newsales[required_cols].copy()
+        if 'Sonderprovision' not in newsales_df.columns:
+            newsales_df['Sonderprovision'] = 0
 
-        if 'Sonderprovision' in ennux.columns:
-            ennux['Sonderprovision'] = pd.to_numeric(ennux['Sonderprovision'], errors='coerce').fillna(0)
-        else:
-            ennux['Sonderprovision'] = 0
+        ennux_df['Provision in Euro'] = pd.to_numeric(ennux_df['Provision in Euro'], errors='coerce').fillna(0)
+        ennux_df['Sonderprovision'] = pd.to_numeric(ennux_df['Sonderprovision'], errors='coerce').fillna(0)
+        ennux_df['Provision Gesamt'] = ennux_df['Provision in Euro'] + ennux_df['Sonderprovision']
 
-        for df in [ennux, newsales]:
-            df.columns = ['Versorger', 'Tarif', 'Tarif_ID', 'Starte', 'Typ', 'Verbrauch_von', 'Verbrauch_bis', 'Provision']
-            df['Verbrauch_von'] = pd.to_numeric(df['Verbrauch_von'], errors='coerce')
-            df['Verbrauch_bis'] = pd.to_numeric(df['Verbrauch_bis'], errors='coerce')
-            df['Provision'] = pd.to_numeric(df['Provision'], errors='coerce')
+        newsales_df['Provision in Euro'] = pd.to_numeric(newsales_df['Provision in Euro'], errors='coerce').fillna(0)
+        newsales_df['Sonderprovision'] = pd.to_numeric(newsales_df['Sonderprovision'], errors='coerce').fillna(0)
+        newsales_df['Provision Gesamt'] = newsales_df['Provision in Euro'] + newsales_df['Sonderprovision']
 
-        ennux['Provision'] = ennux['Provision'] + ennux['Sonderprovision']
-        ennux['Quelle'] = 'Ennux'
-        newsales['Quelle'] = 'Newsales24'
+        ennux_df.columns = newsales_df.columns = ['Versorger', 'Tarif', 'Tarif_ID', 'Starte', 'Typ',
+                                                  'Verbrauch_von', 'Verbrauch_bis', 'Provision', 'Sonderprovision', 'Provision_Gesamt']
 
         merged = pd.merge(
-            ennux,
-            newsales,
+            ennux_df,
+            newsales_df,
             on=['Versorger', 'Tarif', 'Tarif_ID', 'Starte', 'Typ', 'Verbrauch_von', 'Verbrauch_bis'],
             suffixes=('_Ennux', '_Newsales24')
         )
 
-        merged['Ergebnis'] = merged[['Provision_Ennux', 'Provision_Newsales24']].max(axis=1)
+        merged['Ergebnis'] = merged[['Provision_Gesamt_Ennux', 'Provision_Gesamt_Newsales24']].max(axis=1)
 
-        filename = f"provisionen_{uuid.uuid4().hex[:8]}.pdf"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        class PDF(FPDF):
+            def __init__(self):
+                super().__init__('L', 'mm', 'A4')
+                self.set_auto_page_break(auto=True, margin=10)
 
-        pdf = FPDF(orientation='L', unit='mm', format='A4')
+            def header(self):
+                self.set_font("Arial", "B", 10)
+                self.cell(0, 10, "Provisionsvergleich Ennux vs. Newsales24", ln=1, align="C")
+
+            def row(self, data, highlight_index=None):
+                self.set_font("Arial", "", 6)
+                for i, item in enumerate(data):
+                    if highlight_index is not None and i == highlight_index:
+                        self.set_fill_color(255, 255, 0)
+                        self.cell(35, 6, str(item), border=1, ln=0, fill=True)
+                    else:
+                        self.cell(35, 6, str(item), border=1, ln=0)
+                self.ln()
+
+        pdf = PDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=7)
-        col_width = 40
-        row_height = 6
 
-        cols = ['Versorger', 'Tarif', 'Tarif_ID', 'Starte', 'Typ', 'Verbrauch_von', 'Verbrauch_bis', 'Provision_Ennux', 'Provision_Newsales24', 'Ergebnis']
-        for col in cols:
-            pdf.cell(col_width, row_height, str(col), border=1)
+        columns = ['Versorger', 'Tarif', 'Tarif_ID', 'Starte', 'Typ', 'Verbrauch_von', 'Verbrauch_bis',
+                   'Provision_Gesamt_Ennux', 'Provision_Gesamt_Newsales24', 'Ergebnis']
+
+        pdf.set_font("Arial", "B", 6)
+        for col in columns:
+            pdf.cell(35, 6, col, border=1)
         pdf.ln()
 
         for _, row in merged.iterrows():
-            highlight = row['Ergebnis'] == row['Provision_Newsales24']
-            for i, col in enumerate(cols):
-                if col == 'Ergebnis' and highlight:
-                    pdf.set_fill_color(255, 255, 0)
-                    pdf.cell(col_width, row_height, str(row[col]), border=1, fill=True)
-                else:
-                    pdf.cell(col_width, row_height, str(row[col]), border=1)
-            pdf.ln()
+            row_list = [row[col] for col in columns]
+            highlight = 9 if row['Ergebnis'] == row['Provision_Gesamt_Newsales24'] else None
+            pdf.row(row_list, highlight_index=highlight)
 
-        pdf.output(filepath)
-        return send_file(filepath, as_attachment=True)
+        output_path = os.path.join(OUTPUT_FOLDER, 'provisionen_vergleich.pdf')
+        pdf.output(output_path)
+
+        return send_file(output_path, as_attachment=True)
 
     except Exception as e:
-        flash(f"Fehler beim Verarbeiten der Dateien: {str(e)}")
-        return render_template('index.html')
+        return render_template('index.html', error=str(e))
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0')
+    app.run()
