@@ -1,19 +1,25 @@
-<!DOCTYPE html>
+
+<!doctype html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8">
   <title>Provisionsvergleich</title>
 </head>
 <body>
-  <h2>CSV-Dateien hochladen</h2>
-  <form action="/vergleichen" method="post" enctype="multipart/form-data">
-    Ennux.csv: <input type="file" name="ennux"><br><br>
-    Newsales.csv: <input type="file" name="newsales"><br><br>
-    <input type="submit" value="Vergleichen & PDF erzeugen">
+  <h2>Provisionen vergleichen & PDF erstellen</h2>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <ul style="color: red;">
+        {% for message in messages %}
+          <li>{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+  <form method="post" action="/vergleichen" enctype="multipart/form-data">
+    <label>Ennux CSV:</label><input type="file" name="ennux_file" required><br><br>
+    <label>Newsales24 CSV:</label><input type="file" name="newsales_file" required><br><br>
+    <button type="submit">Vergleichen & PDF generieren</button>
   </form>
-
-  {% if pdf_url %}
-    <p><a href="{{ pdf_url }}" target="_blank">📄 PDF herunterladen</a></p>
-  {% endif %}
 </body>
 </html>
